@@ -201,9 +201,10 @@ func handleIngest(w http.ResponseWriter, r *http.Request, cfg config) {
 			event.Extra = parsedPayload.Extra
 		}
 		if parsedPayload.Timestamp != "" {
-			if ts, err := time.Parse(time.RFC3339, parsedPayload.Timestamp); err == nil {
-				event.Timestamp = ts
+			if event.Extra == nil {
+				event.Extra = map[string]interface{}{}
 			}
+			event.Extra["payload_timestamp"] = parsedPayload.Timestamp
 		}
 	} else {
 		event.Message = string(body)
@@ -259,17 +260,29 @@ func handleFastly(w http.ResponseWriter, r *http.Request, cfg config) {
 		return
 	}
 
-	accepted := 0
+	eventIDs := make([]string, 0, len(events))
 	for _, fe := range events {
 		event := buildFastlySentryEvent(fe, r)
-		if sentry.CaptureEvent(event) != nil {
-			accepted++
+		eventID := sentry.CaptureEvent(event)
+		if eventID == nil {
+			continue
 		}
+		if id := string(*eventID); id != "" {
+			eventIDs = append(eventIDs, id)
+		}
+	}
+
+	resp, err := json.Marshal(map[string]interface{}{
+		"event_ids": eventIDs,
+	})
+	if err != nil {
+		w.WriteHeader(http.StatusAccepted)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	_, _ = w.Write([]byte("{\"accepted\":" + strconv.Itoa(accepted) + "}"))
+	_, _ = w.Write(resp)
 }
 
 func buildFastlySentryEvent(fe fastlyEvent, r *http.Request) *sentry.Event {
@@ -303,7 +316,8 @@ func buildFastlySentryEvent(fe fastlyEvent, r *http.Request) *sentry.Event {
 	}
 
 	event.Extra = map[string]interface{}{
-		"fastly": fe,
+		"fastly":           fe,
+		"fastly_timestamp": fe.Timestamp,
 	}
 
 	reqURL := buildFastlyURL(fe)
@@ -325,20 +339,16 @@ func buildFastlySentryEvent(fe fastlyEvent, r *http.Request) *sentry.Event {
 }
 
 func buildFastlyMessage(fe fastlyEvent) string {
-	parts := []string{}
-	if fe.ResponseState != "" {
-		parts = append(parts, strings.ToLower(fe.ResponseState))
-	}
+	state := strings.ToUpper(strings.TrimSpace(fe.ResponseState))
+	status := ""
 	if fe.ResponseStatus != 0 {
-		parts = append(parts, strconv.Itoa(fe.ResponseStatus))
+		status = strconv.Itoa(fe.ResponseStatus)
 	}
-	if fe.ResponseReason != "" {
-		parts = append(parts, fe.ResponseReason)
+	message := strings.TrimSpace("FASTLY " + strings.TrimSpace(strings.Join([]string{state, status}, " ")))
+	if message == "FASTLY" {
+		return "FASTLY"
 	}
-	if fe.Host != "" || fe.URL != "" {
-		parts = append(parts, fe.Host+fe.URL)
-	}
-	return strings.TrimSpace(strings.Join(parts, " "))
+	return message
 }
 
 func mapFastlyLevel(fe fastlyEvent) sentry.Level {
@@ -357,19 +367,6 @@ func mapFastlyLevel(fe fastlyEvent) sentry.Level {
 		return sentry.LevelWarning
 	}
 	return sentry.LevelInfo
-}
-
-func parseFastlyTimestamp(value string) (time.Time, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return time.Time{}, errors.New("empty timestamp")
-	}
-
-	if ts, err := time.Parse(time.RFC3339, value); err == nil {
-		return ts, nil
-	}
-
-	return time.Parse("2006-01-02T15:04:05-0700", value)
 }
 
 func buildFastlyURL(fe fastlyEvent) string {
