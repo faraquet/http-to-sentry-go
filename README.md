@@ -1,6 +1,6 @@
 # http-to-sentry-go
 
-Small Go service that receives HTTP log payloads and forwards each entry to Sentry.
+Small Go service that receives HTTP log payloads and forwards each entry to Sentry. It uses the official Sentry Go SDK and runs as a lightweight HTTP ingest service with optional Fastly log support.
 
 ## Environment
 
@@ -130,8 +130,8 @@ curl -X POST http://127.0.0.1:8080/ingest \
 ## Release
 
 ```bash
-make release VERSION=0.1.7
-make release IMAGE=faraquet/http-to-sentry-go VERSION=0.1.7
+make release VERSION=0.1.8
+make release IMAGE=faraquet/http-to-sentry-go VERSION=0.1.8
 ```
 
 ## Docker
