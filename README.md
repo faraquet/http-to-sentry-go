@@ -11,6 +11,7 @@ Small Go service that receives HTTP log payloads and forwards each entry to Sent
 - `HTTP_ADDR` (optional, default `0.0.0.0:8080`): HTTP listen address.
 - `HTTP_PATH` (optional, default `/ingest`): generic ingest path.
 - `HTTP_FASTLY_PATH` (optional, default `/fastly`): Fastly events path.
+- `HTTP_AUTH_TOKEN` (optional): if set, require `Authorization: Bearer <token>` for ingest endpoints.
 - `HTTP_MAX_BODY_BYTES` (optional, default `262144`): max request body size.
 - `HTTP_SHUTDOWN_TIMEOUT_MS` (optional, default `5000`): graceful shutdown timeout.
 

@@ -22,6 +22,7 @@ type config struct {
 	httpAddr      string
 	httpPath      string
 	fastlyPath    string
+	authToken     string
 	maxBodyBytes  int
 	flushTimeout  time.Duration
 	shutdownGrace time.Duration
@@ -65,12 +66,23 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc(cfg.httpPath, func(w http.ResponseWriter, r *http.Request) {
+		if !requireBearer(w, r, cfg) {
+			return
+		}
 		handleIngest(w, r, cfg)
 	})
 	mux.HandleFunc(cfg.fastlyPath, func(w http.ResponseWriter, r *http.Request) {
+		if !requireBearer(w, r, cfg) {
+			return
+		}
 		handleFastly(w, r, cfg)
 	})
-	mux.HandleFunc("/health", handleHealth)
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		if !requireBearer(w, r, cfg) {
+			return
+		}
+		handleHealth(w, r)
+	})
 
 	srv := &http.Server{
 		Addr:              cfg.httpAddr,
@@ -96,6 +108,18 @@ func main() {
 	sentry.Flush(cfg.flushTimeout)
 }
 
+func requireBearer(w http.ResponseWriter, r *http.Request, cfg config) bool {
+	if cfg.authToken == "" {
+		return true
+	}
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	if auth == "Bearer "+cfg.authToken {
+		return true
+	}
+	w.WriteHeader(http.StatusUnauthorized)
+	return false
+}
+
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -114,6 +138,7 @@ func loadConfig() config {
 	httpAddr := envOrDefault("HTTP_ADDR", "0.0.0.0:8080")
 	httpPath := envOrDefault("HTTP_PATH", "/ingest")
 	fastlyPath := envOrDefault("HTTP_FASTLY_PATH", "/fastly")
+	authToken := strings.TrimSpace(os.Getenv("HTTP_AUTH_TOKEN"))
 	if !strings.HasPrefix(httpPath, "/") {
 		httpPath = "/" + httpPath
 	}
@@ -135,6 +160,7 @@ func loadConfig() config {
 		httpAddr:      httpAddr,
 		httpPath:      httpPath,
 		fastlyPath:    fastlyPath,
+		authToken:     authToken,
 		maxBodyBytes:  maxBodyBytes,
 		flushTimeout:  flushTimeout,
 		shutdownGrace: shutdownGrace,
