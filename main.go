@@ -77,12 +77,7 @@ func main() {
 		}
 		handleFastly(w, r, cfg)
 	})
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		if !requireBearer(w, r, cfg) {
-			return
-		}
-		handleHealth(w, r)
-	})
+	mux.HandleFunc("/health", handleHealth)
 
 	srv := &http.Server{
 		Addr:              cfg.httpAddr,
@@ -118,6 +113,26 @@ func requireBearer(w http.ResponseWriter, r *http.Request, cfg config) bool {
 	}
 	w.WriteHeader(http.StatusUnauthorized)
 	return false
+}
+
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		ww := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(ww, r)
+		log.Printf("%s %s %d %s %s", r.Method, r.URL.Path, ww.status, time.Since(start).Truncate(time.Millisecond), r.RemoteAddr)
+	})
+}
+
+// statusWriter captures the response status code.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
