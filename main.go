@@ -73,7 +73,7 @@ func main() {
 	mux.HandleFunc("/health", handleHealth)
 	mux.HandleFunc("/.well-known/fastly/logging/challenge", fastly.ChallengeHandler(cfg.fastlyServiceID))
 
-	handler := loggingMiddleware(mux, 4096)
+	handler := loggingMiddleware(mux, 4096, 2048)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -118,10 +118,10 @@ func requireBearer(w http.ResponseWriter, r *http.Request, cfg config) bool {
 	return false
 }
 
-func loggingMiddleware(next http.Handler, maxLogBytes int) http.Handler {
+func loggingMiddleware(next http.Handler, maxLogBytes, maxRespBytes int) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		ww := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		ww := &statusWriter{ResponseWriter: w, status: http.StatusOK, maxBody: maxRespBytes}
 
 		var payload string
 		if r.Body != nil && (r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch) {
@@ -142,8 +142,12 @@ func loggingMiddleware(next http.Handler, maxLogBytes int) http.Handler {
 		}
 
 		next.ServeHTTP(ww, r)
-		if payload != "" {
-			log.Printf("%s %s %d %s %s payload=%q", r.Method, r.URL.Path, ww.status, time.Since(start).Truncate(time.Millisecond), r.RemoteAddr, payload)
+		resp := ww.body.String()
+		if ww.truncated {
+			resp += "…"
+		}
+		if payload != "" || resp != "" {
+			log.Printf("%s %s %d %s %s payload=%q response=%q", r.Method, r.URL.Path, ww.status, time.Since(start).Truncate(time.Millisecond), r.RemoteAddr, payload, resp)
 			return
 		}
 		log.Printf("%s %s %d %s %s", r.Method, r.URL.Path, ww.status, time.Since(start).Truncate(time.Millisecond), r.RemoteAddr)
@@ -153,12 +157,32 @@ func loggingMiddleware(next http.Handler, maxLogBytes int) http.Handler {
 // statusWriter captures the response status code.
 type statusWriter struct {
 	http.ResponseWriter
-	status int
+	status    int
+	maxBody   int
+	truncated bool
+	body      bytes.Buffer
 }
 
 func (w *statusWriter) WriteHeader(status int) {
 	w.status = status
 	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusWriter) Write(data []byte) (int, error) {
+	if w.maxBody > 0 {
+		remaining := w.maxBody - w.body.Len()
+		if remaining > 0 {
+			if len(data) > remaining {
+				_, _ = w.body.Write(data[:remaining])
+				w.truncated = true
+			} else {
+				_, _ = w.body.Write(data)
+			}
+		} else {
+			w.truncated = true
+		}
+	}
+	return w.ResponseWriter.Write(data)
 }
 
 func runHTTP(ctx context.Context, addr string, handler http.Handler, shutdownGrace time.Duration) error {
