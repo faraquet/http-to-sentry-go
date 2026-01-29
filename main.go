@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -79,9 +80,11 @@ func main() {
 	})
 	mux.HandleFunc("/health", handleHealth)
 
+	handler := loggingMiddleware(mux, 4096)
+
 	srv := &http.Server{
 		Addr:              cfg.httpAddr,
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -115,11 +118,34 @@ func requireBearer(w http.ResponseWriter, r *http.Request, cfg config) bool {
 	return false
 }
 
-func loggingMiddleware(next http.Handler) http.Handler {
+func loggingMiddleware(next http.Handler, maxLogBytes int) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		ww := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+
+		var payload string
+		if r.Body != nil && (r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch) {
+			limit := int64(maxLogBytes)
+			data, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+			if err == nil {
+				truncated := int64(len(data)) > limit
+				if truncated {
+					data = data[:limit]
+				}
+				payload = string(data)
+				if truncated {
+					payload += "…"
+				}
+				// Restore body for downstream handlers.
+				r.Body = io.NopCloser(bytes.NewReader(data))
+			}
+		}
+
 		next.ServeHTTP(ww, r)
+		if payload != "" {
+			log.Printf("%s %s %d %s %s payload=%q", r.Method, r.URL.Path, ww.status, time.Since(start).Truncate(time.Millisecond), r.RemoteAddr, payload)
+			return
+		}
 		log.Printf("%s %s %d %s %s", r.Method, r.URL.Path, ww.status, time.Since(start).Truncate(time.Millisecond), r.RemoteAddr)
 	})
 }
