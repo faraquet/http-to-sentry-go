@@ -5,7 +5,7 @@ Small Go service that receives HTTP log payloads and forwards each entry to Sent
 ## Environment
 
 - `SENTRY_DSN` (required): Sentry DSN.
-- `SENTRY_ENVIRONMENT` (optional): Sentry environment name.
+- `SENTRY_ENVIRONMENT` (optional, default `development`): Sentry environment name.
 - `SENTRY_RELEASE` (optional): Sentry release name.
 - `SENTRY_FLUSH_TIMEOUT_MS` (optional, default `2000`): flush timeout on shutdown.
 - `HTTP_ADDR` (optional, default `0.0.0.0:8080`): HTTP listen address.
@@ -52,7 +52,7 @@ curl -X POST http://127.0.0.1:8080/ingest \
     "message": "order failed",
     "level": "error",
     "timestamp": "2026-01-29T12:34:56Z",
-    "tags": {"service": "checkout", "env": "prod"},
+    "tags": {"service": "checkout"},
     "extra": {"order_id": 1234, "amount": 49.99}
   }'
 ```

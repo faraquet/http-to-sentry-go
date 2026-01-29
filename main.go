@@ -101,9 +101,14 @@ func loadConfig() config {
 }
 
 func initSentry() error {
+	env := strings.TrimSpace(os.Getenv("SENTRY_ENVIRONMENT"))
+	if env == "" {
+		env = "development"
+	}
+
 	options := sentry.ClientOptions{
 		Dsn:         strings.TrimSpace(os.Getenv("SENTRY_DSN")),
-		Environment: strings.TrimSpace(os.Getenv("SENTRY_ENVIRONMENT")),
+		Environment: env,
 		Release:     strings.TrimSpace(os.Getenv("SENTRY_RELEASE")),
 	}
 
