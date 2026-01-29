@@ -1,5 +1,5 @@
 IMAGE ?= faraquet/http-to-sentry-go
-VERSION ?= 0.2.1
+VERSION ?= 0.2.2
 
 .PHONY: build push release test
 

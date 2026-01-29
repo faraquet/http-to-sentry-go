@@ -42,27 +42,6 @@ type payload struct {
 	Extra     map[string]interface{} `json:"extra"`
 }
 
-type fastlyEvent struct {
-	Timestamp        string `json:"timestamp"`
-	ClientIP         string `json:"client_ip"`
-	GeoCountry       string `json:"geo_country"`
-	GeoCity          string `json:"geo_city"`
-	Host             string `json:"host"`
-	URL              string `json:"url"`
-	OriginalURL      string `json:"original_url"`
-	RequestMethod    string `json:"request_method"`
-	RequestProtocol  string `json:"request_protocol"`
-	RequestReferer   string `json:"request_referer"`
-	RequestUserAgent string `json:"request_user_agent"`
-	ResponseState    string `json:"response_state"`
-	ResponseStatus   int    `json:"response_status"`
-	ResponseReason   string `json:"response_reason"`
-	ResponseBodySize int64  `json:"response_body_size"`
-	TLSClientJA3MD5  string `json:"tls_client_ja3_md5"`
-	FastlyServer     string `json:"fastly_server"`
-	FastlyIsEdge     bool   `json:"fastly_is_edge"`
-}
-
 func main() {
 	cfg := loadConfig()
 
@@ -77,16 +56,20 @@ func main() {
 		}
 		handleIngest(w, r, cfg)
 	})
-	fastlyHandler := fastly.Handler{
-		MaxBodyBytes: cfg.maxBodyBytes,
-		Capture:      sentry.CaptureEvent,
-	}
-	mux.HandleFunc(cfg.fastlyPath, func(w http.ResponseWriter, r *http.Request) {
-		if !requireBearer(w, r, cfg) {
-			return
+	if cfg.fastlyServiceID != "" {
+		fastlyHandler := fastly.Handler{
+			MaxBodyBytes: cfg.maxBodyBytes,
+			Capture:      sentry.CaptureEvent,
 		}
-		fastlyHandler.HandleEvents(w, r)
-	})
+		mux.HandleFunc(cfg.fastlyPath, func(w http.ResponseWriter, r *http.Request) {
+			if !requireBearer(w, r, cfg) {
+				return
+			}
+			fastlyHandler.HandleEvents(w, r)
+		})
+
+	}
+
 	mux.HandleFunc("/health", handleHealth)
 	mux.HandleFunc("/.well-known/fastly/logging/challenge", fastly.ChallengeHandler(cfg.fastlyServiceID))
 
@@ -115,7 +98,7 @@ func main() {
 		}()
 	}
 
-	log.Printf("ready: http=%s https=%s ingest=%s fastly=%s", cfg.httpAddr, cfg.httpsAddr, cfg.httpPath, cfg.fastlyPath)
+	log.Printf("ready: http=%s https=%s ingest=%s fastly=%s enabled=%t", cfg.httpAddr, cfg.httpsAddr, cfg.httpPath, cfg.fastlyPath, cfg.fastlyServiceID != "")
 	<-ctx.Done()
 	log.Printf("shutting down")
 
