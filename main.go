@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -13,6 +15,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -20,13 +23,17 @@ import (
 )
 
 type config struct {
-	httpAddr      string
-	httpPath      string
-	fastlyPath    string
-	authToken     string
-	maxBodyBytes  int
-	flushTimeout  time.Duration
-	shutdownGrace time.Duration
+	httpAddr        string
+	httpsAddr       string
+	httpsCertFile   string
+	httpsKeyFile    string
+	httpPath        string
+	fastlyPath      string
+	fastlyServiceID string
+	authToken       string
+	maxBodyBytes    int
+	flushTimeout    time.Duration
+	shutdownGrace   time.Duration
 }
 
 type payload struct {
@@ -79,30 +86,40 @@ func main() {
 		handleFastly(w, r, cfg)
 	})
 	mux.HandleFunc("/health", handleHealth)
+	mux.HandleFunc("/.well-known/fastly/logging/challenge", func(w http.ResponseWriter, r *http.Request) {
+		handleFastlyChallenge(w, r, cfg)
+	})
 
 	handler := loggingMiddleware(mux, 4096)
-
-	srv := &http.Server{
-		Addr:              cfg.httpAddr,
-		Handler:           handler,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.shutdownGrace)
-		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
-	}()
-
-	log.Printf("ready: http=%s ingest=%s fastly=%s", cfg.httpAddr, cfg.httpPath, cfg.fastlyPath)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Printf("http server error: %v", err)
+	var wg sync.WaitGroup
+	if cfg.httpAddr != "" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := runHTTP(ctx, cfg.httpAddr, handler, cfg.shutdownGrace); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("http server error: %v", err)
+			}
+		}()
+	}
+	if cfg.httpsAddr != "" && cfg.httpsCertFile != "" && cfg.httpsKeyFile != "" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := runHTTPS(ctx, cfg.httpsAddr, cfg.httpsCertFile, cfg.httpsKeyFile, handler, cfg.shutdownGrace); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("https server error: %v", err)
+			}
+		}()
 	}
 
+	log.Printf("ready: http=%s https=%s ingest=%s fastly=%s", cfg.httpAddr, cfg.httpsAddr, cfg.httpPath, cfg.fastlyPath)
+	<-ctx.Done()
+	log.Printf("shutting down")
+
+	wg.Wait()
 	sentry.Flush(cfg.flushTimeout)
 }
 
@@ -161,6 +178,38 @@ func (w *statusWriter) WriteHeader(status int) {
 	w.ResponseWriter.WriteHeader(status)
 }
 
+func runHTTP(ctx context.Context, addr string, handler http.Handler, shutdownGrace time.Duration) error {
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+
+	return srv.ListenAndServe()
+}
+
+func runHTTPS(ctx context.Context, addr, certFile, keyFile string, handler http.Handler, shutdownGrace time.Duration) error {
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+
+	return srv.ListenAndServeTLS(certFile, keyFile)
+}
+
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -170,6 +219,23 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
+func handleFastlyChallenge(w http.ResponseWriter, r *http.Request, cfg config) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	serviceID := strings.TrimSpace(cfg.fastlyServiceID)
+	if serviceID == "" {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	sum := sha256.Sum256([]byte(serviceID))
+	value := hex.EncodeToString(sum[:])
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(value + "\n"))
+}
+
 func loadConfig() config {
 	maxBodyBytes := envInt("HTTP_MAX_BODY_BYTES", 262144)
 	if maxBodyBytes < 1024 {
@@ -177,8 +243,12 @@ func loadConfig() config {
 	}
 
 	httpAddr := envOrDefault("HTTP_ADDR", "0.0.0.0:8080")
+	httpsAddr := envOrDefault("HTTPS_ADDR", "")
+	httpsCertFile := strings.TrimSpace(os.Getenv("HTTPS_CERT_FILE"))
+	httpsKeyFile := strings.TrimSpace(os.Getenv("HTTPS_KEY_FILE"))
 	httpPath := envOrDefault("HTTP_PATH", "/ingest")
 	fastlyPath := envOrDefault("HTTP_FASTLY_PATH", "/fastly")
+	fastlyServiceID := strings.TrimSpace(os.Getenv("FASTLY_SERVICE_ID"))
 	authToken := strings.TrimSpace(os.Getenv("HTTP_AUTH_TOKEN"))
 	if !strings.HasPrefix(httpPath, "/") {
 		httpPath = "/" + httpPath
@@ -198,13 +268,17 @@ func loadConfig() config {
 	}
 
 	return config{
-		httpAddr:      httpAddr,
-		httpPath:      httpPath,
-		fastlyPath:    fastlyPath,
-		authToken:     authToken,
-		maxBodyBytes:  maxBodyBytes,
-		flushTimeout:  flushTimeout,
-		shutdownGrace: shutdownGrace,
+		httpAddr:        httpAddr,
+		httpsAddr:       httpsAddr,
+		httpsCertFile:   httpsCertFile,
+		httpsKeyFile:    httpsKeyFile,
+		httpPath:        httpPath,
+		fastlyPath:      fastlyPath,
+		fastlyServiceID: fastlyServiceID,
+		authToken:       authToken,
+		maxBodyBytes:    maxBodyBytes,
+		flushTimeout:    flushTimeout,
+		shutdownGrace:   shutdownGrace,
 	}
 }
 
