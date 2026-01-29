@@ -122,6 +122,13 @@ curl -X POST http://127.0.0.1:8080/ingest \
   -d 'plain text log line'
 ```
 
+## Release
+
+```bash
+make release VERSION=v0.1.0
+make release IMAGE=faraquet/http-to-sentry-go VERSION=v0.1.0
+```
+
 ## Docker
 
 ```bash
