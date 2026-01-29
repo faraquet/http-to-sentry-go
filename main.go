@@ -3,14 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -20,6 +17,7 @@ import (
 	"time"
 
 	"github.com/getsentry/sentry-go"
+	"http-to-sentry-go/fastly"
 )
 
 type config struct {
@@ -79,16 +77,18 @@ func main() {
 		}
 		handleIngest(w, r, cfg)
 	})
+	fastlyHandler := fastly.Handler{
+		MaxBodyBytes: cfg.maxBodyBytes,
+		Capture:      sentry.CaptureEvent,
+	}
 	mux.HandleFunc(cfg.fastlyPath, func(w http.ResponseWriter, r *http.Request) {
 		if !requireBearer(w, r, cfg) {
 			return
 		}
-		handleFastly(w, r, cfg)
+		fastlyHandler.HandleEvents(w, r)
 	})
 	mux.HandleFunc("/health", handleHealth)
-	mux.HandleFunc("/.well-known/fastly/logging/challenge", func(w http.ResponseWriter, r *http.Request) {
-		handleFastlyChallenge(w, r, cfg)
-	})
+	mux.HandleFunc("/.well-known/fastly/logging/challenge", fastly.ChallengeHandler(cfg.fastlyServiceID))
 
 	handler := loggingMiddleware(mux, 4096)
 
@@ -217,23 +217,6 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
-}
-
-func handleFastlyChallenge(w http.ResponseWriter, r *http.Request, cfg config) {
-	if r.Method != http.MethodGet {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-	serviceID := strings.TrimSpace(cfg.fastlyServiceID)
-	if serviceID == "" {
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-	sum := sha256.Sum256([]byte(serviceID))
-	value := hex.EncodeToString(sum[:])
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(value + "\n"))
 }
 
 func loadConfig() config {
@@ -385,163 +368,6 @@ func handleIngest(w http.ResponseWriter, r *http.Request, cfg config) {
 	_, _ = w.Write([]byte("{\"event_id\":\"" + eventIDStr + "\"}"))
 }
 
-func handleFastly(w http.ResponseWriter, r *http.Request, cfg config) {
-	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-
-	body, tooLarge, err := readLimitedBody(r.Body, cfg.maxBodyBytes)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-	if tooLarge {
-		w.WriteHeader(http.StatusRequestEntityTooLarge)
-		return
-	}
-	if len(body) == 0 {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	events, ok := parseFastlyEvents(body)
-	if !ok || len(events) == 0 {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	eventIDs := make([]string, 0, len(events))
-	for _, fe := range events {
-		event := buildFastlySentryEvent(fe, r)
-		eventID := sentry.CaptureEvent(event)
-		if eventID == nil {
-			continue
-		}
-		if id := string(*eventID); id != "" {
-			eventIDs = append(eventIDs, id)
-		}
-	}
-
-	resp, err := json.Marshal(map[string]interface{}{
-		"event_ids": eventIDs,
-	})
-	if err != nil {
-		w.WriteHeader(http.StatusAccepted)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	_, _ = w.Write(resp)
-}
-
-func buildFastlySentryEvent(fe fastlyEvent, r *http.Request) *sentry.Event {
-	event := sentry.NewEvent()
-	event.Logger = "fastly"
-	event.Timestamp = time.Now()
-	event.Level = mapFastlyLevel(fe)
-
-	message := buildFastlyMessage(fe)
-	if message == "" {
-		message = "fastly event"
-	}
-	event.Message = message
-
-	event.Tags = map[string]string{
-		"host":             fe.Host,
-		"response_state":   fe.ResponseState,
-		"request_method":   fe.RequestMethod,
-		"request_protocol": fe.RequestProtocol,
-		"fastly_server":    fe.FastlyServer,
-	}
-	addTag(event.Tags, "geo_country", fe.GeoCountry)
-	addTag(event.Tags, "geo_city", fe.GeoCity)
-	addTag(event.Tags, "tls_client_ja3_md5", fe.TLSClientJA3MD5)
-	if fe.FastlyIsEdge {
-		event.Tags["fastly_is_edge"] = "true"
-	}
-
-	event.Extra = map[string]interface{}{
-		"fastly":           fe,
-		"fastly_timestamp": fe.Timestamp,
-	}
-
-	reqURL := buildFastlyURL(fe)
-	if reqURL != "" {
-		event.Request = &sentry.Request{
-			URL:         reqURL,
-			Method:      fe.RequestMethod,
-			Headers:     map[string]string{"User-Agent": fe.RequestUserAgent, "Referer": fe.RequestReferer},
-			QueryString: queryStringFromURL(reqURL),
-		}
-	}
-
-	if fe.ClientIP != "" {
-		event.User = sentry.User{IPAddress: fe.ClientIP}
-	}
-
-	addTag(event.Tags, "remote_addr", r.RemoteAddr)
-	return event
-}
-
-func buildFastlyMessage(fe fastlyEvent) string {
-	state := strings.TrimSpace(fe.ResponseState)
-	status := ""
-	if fe.ResponseStatus != 0 {
-		status = strconv.Itoa(fe.ResponseStatus)
-	}
-	reason := strings.TrimSpace(fe.ResponseReason)
-	message := strings.TrimSpace("HTTP::" + strings.Join([]string{state, status}, ""))
-	if message == "HTTP::" {
-		message = "HTTP"
-	}
-	if reason == "" {
-		return message
-	}
-	return message + " (" + reason + ")"
-}
-
-func mapFastlyLevel(fe fastlyEvent) sentry.Level {
-	state := strings.ToLower(strings.TrimSpace(fe.ResponseState))
-	switch state {
-	case "error", "fail", "failed":
-		return sentry.LevelError
-	case "warning", "warn":
-		return sentry.LevelWarning
-	}
-
-	if fe.ResponseStatus >= 500 {
-		return sentry.LevelError
-	}
-	if fe.ResponseStatus >= 400 {
-		return sentry.LevelWarning
-	}
-	return sentry.LevelInfo
-}
-
-func buildFastlyURL(fe fastlyEvent) string {
-	if fe.Host == "" && fe.URL == "" {
-		return ""
-	}
-	path := fe.URL
-	if path == "" {
-		path = "/"
-	}
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-	return "https://" + fe.Host + path
-}
-
-func queryStringFromURL(raw string) string {
-	parsed, err := url.Parse(raw)
-	if err != nil {
-		return ""
-	}
-	return parsed.RawQuery
-}
-
 func readLimitedBody(body io.ReadCloser, maxBytes int) ([]byte, bool, error) {
 	defer body.Close()
 	limit := int64(maxBytes)
@@ -568,20 +394,6 @@ func parsePayload(contentType string, body []byte) (payload, bool) {
 	return parsed, true
 }
 
-func parseFastlyEvents(body []byte) ([]fastlyEvent, bool) {
-	var single fastlyEvent
-	if err := json.Unmarshal(body, &single); err == nil {
-		return []fastlyEvent{single}, true
-	}
-
-	var multiple []fastlyEvent
-	if err := json.Unmarshal(body, &multiple); err == nil {
-		return multiple, true
-	}
-
-	return nil, false
-}
-
 func parseLevel(level string) sentry.Level {
 	switch strings.ToLower(strings.TrimSpace(level)) {
 	case "fatal":
@@ -597,13 +409,6 @@ func parseLevel(level string) sentry.Level {
 	default:
 		return sentry.LevelInfo
 	}
-}
-
-func addTag(tags map[string]string, key, value string) {
-	if value == "" {
-		return
-	}
-	tags[key] = value
 }
 
 func envOrDefault(key, def string) string {
