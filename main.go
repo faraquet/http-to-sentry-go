@@ -70,6 +70,7 @@ func main() {
 	mux.HandleFunc(cfg.fastlyPath, func(w http.ResponseWriter, r *http.Request) {
 		handleFastly(w, r, cfg)
 	})
+	mux.HandleFunc("/health", handleHealth)
 
 	srv := &http.Server{
 		Addr:              cfg.httpAddr,
@@ -93,6 +94,15 @@ func main() {
 	}
 
 	sentry.Flush(cfg.flushTimeout)
+}
+
+func handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok"))
 }
 
 func loadConfig() config {
@@ -297,10 +307,6 @@ func buildFastlySentryEvent(fe fastlyEvent, r *http.Request) *sentry.Event {
 	}
 	event.Message = message
 
-	if ts, err := parseFastlyTimestamp(fe.Timestamp); err == nil {
-		event.Timestamp = ts
-	}
-
 	event.Tags = map[string]string{
 		"host":             fe.Host,
 		"response_state":   fe.ResponseState,
@@ -344,9 +350,9 @@ func buildFastlyMessage(fe fastlyEvent) string {
 	if fe.ResponseStatus != 0 {
 		status = strconv.Itoa(fe.ResponseStatus)
 	}
-	message := strings.TrimSpace("FASTLY " + strings.TrimSpace(strings.Join([]string{state, status}, " ")))
-	if message == "FASTLY" {
-		return "FASTLY"
+	message := strings.TrimSpace("HTTP " + strings.TrimSpace(strings.Join([]string{state, status}, " ")))
+	if message == "HTTP" {
+		return "HTTP"
 	}
 	return message
 }
