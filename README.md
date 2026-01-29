@@ -37,22 +37,22 @@ Accepts Fastly event JSON objects (or arrays). Example fields:
 ```json
 {
   "timestamp": "2026-01-29T11:41:12+0000",
-  "client_ip": "185.158.242.62",
-  "geo_country": "united kingdom",
-  "geo_city": "lewisham",
+  "client_ip": "203.0.113.10",
+  "geo_country": "exampleland",
+  "geo_city": "exampleville",
   "host": "example.com",
-  "url": "/admin/expedia/manual_import_update",
+  "url": "/path/to/resource",
   "original_url": "",
   "request_method": "POST",
   "request_protocol": "HTTP/2",
-  "request_referer": "https://example.com/admin/places",
-  "request_user_agent": "Mozilla/5.0...",
+  "request_referer": "https://example.com/previous",
+  "request_user_agent": "Mozilla/5.0 (Example OS; Example Arch) ExampleBrowser/1.0",
   "response_state": "ERROR",
   "response_status": 503,
-  "response_reason": "first byte timeout",
+  "response_reason": "origin timeout",
   "response_body_size": 444,
-  "tls_client_ja3_md5": "b81b4065aed2744f56e62b616a176a83",
-  "fastly_server": "cache-lon4272-LON",
+  "tls_client_ja3_md5": "00000000000000000000000000000000",
+  "fastly_server": "cache-example-XYZ",
   "fastly_is_edge": true
 }
 ```
