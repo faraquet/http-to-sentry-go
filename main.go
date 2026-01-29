@@ -486,16 +486,20 @@ func buildFastlySentryEvent(fe fastlyEvent, r *http.Request) *sentry.Event {
 }
 
 func buildFastlyMessage(fe fastlyEvent) string {
-	state := strings.ToUpper(strings.TrimSpace(fe.ResponseState))
+	state := strings.TrimSpace(fe.ResponseState)
 	status := ""
 	if fe.ResponseStatus != 0 {
 		status = strconv.Itoa(fe.ResponseStatus)
 	}
-	message := strings.TrimSpace("HTTP " + strings.TrimSpace(strings.Join([]string{state, status}, " ")))
-	if message == "HTTP" {
-		return "HTTP"
+	reason := strings.TrimSpace(fe.ResponseReason)
+	message := strings.TrimSpace("HTTP::" + strings.Join([]string{state, status}, ""))
+	if message == "HTTP::" {
+		message = "HTTP"
 	}
-	return message
+	if reason == "" {
+		return message
+	}
+	return message + " (" + reason + ")"
 }
 
 func mapFastlyLevel(fe fastlyEvent) sentry.Level {
