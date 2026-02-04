@@ -139,8 +139,8 @@ make test
 ## Release
 
 ```bash
-make release VERSION=0.2.3
-make release IMAGE=faraquet/http-to-sentry-go VERSION=0.2.3
+make release VERSION=0.2.4
+make release IMAGE=faraquet/http-to-sentry-go VERSION=0.2.4
 ```
 
 ## Docker
