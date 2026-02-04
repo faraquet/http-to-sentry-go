@@ -124,24 +124,19 @@ func loggingMiddleware(next http.Handler, maxLogBytes, maxRespBytes int) http.Ha
 		ww := &statusWriter{ResponseWriter: w, status: http.StatusOK, maxBody: maxRespBytes}
 
 		var payload string
-		if r.Body != nil && (r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch) {
-			limit := int64(maxLogBytes)
-			data, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
-			if err == nil {
-				truncated := int64(len(data)) > limit
-				if truncated {
-					data = data[:limit]
-				}
-				payload = string(data)
-				if truncated {
-					payload += "…"
-				}
-				// Restore body for downstream handlers.
-				r.Body = io.NopCloser(bytes.NewReader(data))
-			}
+		var bodyLog *bodyCapture
+		if maxLogBytes > 0 && r.Body != nil && (r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch) {
+			bodyLog = &bodyCapture{rc: r.Body, max: maxLogBytes}
+			r.Body = bodyLog
 		}
 
 		next.ServeHTTP(ww, r)
+		if bodyLog != nil && bodyLog.buf.Len() > 0 {
+			payload = bodyLog.buf.String()
+			if bodyLog.truncated {
+				payload += "…"
+			}
+		}
 		resp := ww.body.String()
 		if ww.truncated {
 			resp += "…"
@@ -183,6 +178,35 @@ func (w *statusWriter) Write(data []byte) (int, error) {
 		}
 	}
 	return w.ResponseWriter.Write(data)
+}
+
+type bodyCapture struct {
+	rc        io.ReadCloser
+	buf       bytes.Buffer
+	max       int
+	truncated bool
+}
+
+func (b *bodyCapture) Read(p []byte) (int, error) {
+	n, err := b.rc.Read(p)
+	if n > 0 && b.max > 0 {
+		remaining := b.max - b.buf.Len()
+		if remaining > 0 {
+			if n > remaining {
+				_, _ = b.buf.Write(p[:remaining])
+				b.truncated = true
+			} else {
+				_, _ = b.buf.Write(p[:n])
+			}
+		} else {
+			b.truncated = true
+		}
+	}
+	return n, err
+}
+
+func (b *bodyCapture) Close() error {
+	return b.rc.Close()
 }
 
 func runHTTP(ctx context.Context, addr string, handler http.Handler, shutdownGrace time.Duration) error {
@@ -227,7 +251,7 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func loadConfig() config {
-	maxBodyBytes := envInt("HTTP_MAX_BODY_BYTES", 262144)
+	maxBodyBytes := envInt("HTTP_MAX_BODY_BYTES", 1048576)
 	if maxBodyBytes < 1024 {
 		maxBodyBytes = 1024
 	}
